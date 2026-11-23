@@ -1,0 +1,13 @@
+# Build output (keep binaries under bin/, never commit them)
+bin/
+dist/
+*.exe
+*.test
+*.out
+
+# Local env / OS
+.env
+.DS_Store
+
+# Coverage
+coverage.out
