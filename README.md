@@ -117,4 +117,4 @@ go build -o bin/ytmgo .
 
 ## License
 
-MIT
+[MIT](https://github.com/Fristonn/ytmgo?tab=MIT-1-ov-file)
