@@ -28,18 +28,17 @@ func ParsePlaylist(raw []byte, playlistID string) (*models.Playlist, error) {
 		return nil, fmt.Errorf("playlist title not found")
 	}
 
-	var author *models.ArtistRef
-	if run := header.Get("straplineTextOne.runs.0"); run.Exists() {
-		author = &models.ArtistRef{
-			Name: run.Get("text").String(),
-			ID:   run.Get("navigationEndpoint.browseEndpoint.browseId").String(),
-		}
+	author := playlistAuthor(header)
+
+	desc := parser.RunsText(header.Get("description.musicDescriptionShelfRenderer.description"))
+	if desc == "" {
+		desc = parser.RunsText(header.Get("description"))
 	}
 
 	pl := &models.Playlist{
 		ID:             strings.TrimPrefix(playlistID, "VL"),
 		Title:          title,
-		Description:    parser.RunsText(header.Get("description")),
+		Description:    desc,
 		Author:         author,
 		Artwork:        ResolveArtwork(header.Get("thumbnail"), "playlist"),
 		TrackCountText: parser.RunsText(header.Get("secondSubtitle")),
@@ -60,6 +59,32 @@ func ParsePlaylist(raw []byte, playlistID string) (*models.Playlist, error) {
 	pl.Continuation = parser.ContinuationToken(shelf)
 
 	return pl, nil
+}
+
+// playlistAuthor reads the owner from strapline text or the facepile avatar stack.
+func playlistAuthor(header gjson.Result) *models.ArtistRef {
+	if run := header.Get("straplineTextOne.runs.0"); run.Exists() {
+		name := run.Get("text").String()
+		if name != "" {
+			return &models.ArtistRef{
+				Name: name,
+				ID:   run.Get("navigationEndpoint.browseEndpoint.browseId").String(),
+			}
+		}
+	}
+	face := header.Get("facepile.avatarStackViewModel")
+	if !face.Exists() {
+		return nil
+	}
+	name := face.Get("text.content").String()
+	if name == "" {
+		name = face.Get("rendererContext.accessibilityContext.label").String()
+	}
+	if name == "" {
+		return nil
+	}
+	id := face.Get("rendererContext.commandContext.onTap.innertubeCommand.browseEndpoint.browseId").String()
+	return &models.ArtistRef{Name: name, ID: id}
 }
 
 // ParsePlaylistContinuation parses continued playlist tracks.

@@ -11,6 +11,15 @@ import (
 
 // RunsText joins Innertube text runs into a single string.
 func RunsText(v gjson.Result) string {
+	if !v.Exists() {
+		return ""
+	}
+	// Nested description shelves (playlist / album headers).
+	if shelf := v.Get("musicDescriptionShelfRenderer.description"); shelf.Exists() {
+		if t := RunsText(shelf); t != "" {
+			return t
+		}
+	}
 	if t := v.Get("runs.#.text"); t.Exists() {
 		var b strings.Builder
 		t.ForEach(func(_, r gjson.Result) bool {
@@ -21,6 +30,10 @@ func RunsText(v gjson.Result) string {
 	}
 	if s := v.Get("simpleText"); s.Exists() {
 		return s.String()
+	}
+	// Avoid dumping raw nested JSON objects as "text".
+	if v.IsObject() || v.IsArray() {
+		return ""
 	}
 	return v.String()
 }
@@ -141,20 +154,10 @@ func ContinuationToken(v gjson.Result) string {
 	return token
 }
 
-// ArtistRefsFromRuns parses odd-element artist runs.
+// ArtistRefsFromRuns parses artist refs from mixed song metadata runs.
+// Album titles, durations, years, and view counts are filtered out.
 func ArtistRefsFromRuns(runs gjson.Result) []models.ArtistRef {
-	var out []models.ArtistRef
-	for _, r := range OddElements(runs) {
-		name := r.Get("text").String()
-		if name == "" || name == "•" {
-			continue
-		}
-		out = append(out, models.ArtistRef{
-			Name: name,
-			ID:   r.Get("navigationEndpoint.browseEndpoint.browseId").String(),
-		})
-	}
-	return out
+	return ParseSongRuns(runs, false).Artists
 }
 
 // BestSquare picks the largest near-square artwork (aspect ~1).

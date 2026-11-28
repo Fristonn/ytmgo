@@ -27,18 +27,22 @@ func ParseRelated(raw []byte) (*models.Section, error) {
 			if id == "" || title == "" {
 				return true
 			}
-			artists := parser.ArtistRefsFromRuns(r.Get("longBylineText.runs"))
-			if len(artists) == 0 {
-				artists = parser.ArtistRefsFromRuns(r.Get("shortBylineText.runs"))
+			meta := parser.ParseSongRuns(r.Get("longBylineText.runs"), false)
+			if len(meta.Artists) == 0 && meta.Album == nil {
+				meta = parser.ParseSongRuns(r.Get("shortBylineText.runs"), false)
 			}
 			durText := r.Get("lengthText.runs.0.text").String()
 			if durText == "" {
 				durText = r.Get("lengthText.simpleText").String()
 			}
+			if durText == "" {
+				durText = meta.DurationText
+			}
 			sec.Tracks = append(sec.Tracks, models.Track{
 				ID:           id,
 				Title:        title,
-				Artists:      artists,
+				Artists:      meta.Artists,
+				Album:        meta.Album,
 				Duration:     parser.ParseDuration(durText),
 				DurationText: durText,
 				Artwork:      parser.PreferMusicArtwork(parser.Thumbnails(r.Get("thumbnail"))),

@@ -84,9 +84,7 @@ func ParseAlbum(raw []byte, browseID string) (*models.Album, error) {
 		}
 		shelf.Get("contents").ForEach(func(_, item gjson.Result) bool {
 			if t := parser.TrackFromResponsiveList(item.Get("musicResponsiveListItemRenderer")); t != nil {
-				if t.Album == nil {
-					t.Album = &models.AlbumRef{ID: browseID, Name: title}
-				}
+				fillAlbumTrack(t, browseID, title, artists)
 				album.Tracks = append(album.Tracks, *t)
 			}
 			return true
@@ -97,6 +95,7 @@ func ParseAlbum(raw []byte, browseID string) (*models.Album, error) {
 		shelf := root.Get("contents.singleColumnBrowseResultsRenderer.tabs.0.tabRenderer.content.sectionListRenderer.contents.0.musicShelfRenderer")
 		shelf.Get("contents").ForEach(func(_, item gjson.Result) bool {
 			if t := parser.TrackFromResponsiveList(item.Get("musicResponsiveListItemRenderer")); t != nil {
+				fillAlbumTrack(t, browseID, title, artists)
 				album.Tracks = append(album.Tracks, *t)
 			}
 			return true
@@ -111,4 +110,15 @@ func ParseAlbum(raw []byte, browseID string) (*models.Album, error) {
 	album.Duration = totalDur
 
 	return album, nil
+}
+
+// fillAlbumTrack sets album ref and inherits album artists when the track row omits them
+// (common on album pages where the artist is only in the header).
+func fillAlbumTrack(t *models.Track, browseID, title string, artists []models.ArtistRef) {
+	if t.Album == nil {
+		t.Album = &models.AlbumRef{ID: browseID, Name: title}
+	}
+	if len(t.Artists) == 0 && len(artists) > 0 {
+		t.Artists = append([]models.ArtistRef(nil), artists...)
+	}
 }

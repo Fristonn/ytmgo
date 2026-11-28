@@ -10,6 +10,8 @@ import (
 )
 
 // TrackFromResponsiveList parses musicResponsiveListItemRenderer into a Track.
+// Flex column 1 (and optionally 2) hold artists / album / duration / views runs;
+// fixed column 0 often holds duration for playlists.
 func TrackFromResponsiveList(r gjson.Result) *models.Track {
 	if !r.Exists() {
 		return nil
@@ -19,38 +21,70 @@ func TrackFromResponsiveList(r gjson.Result) *models.Track {
 		id = r.Get("navigationEndpoint.watchEndpoint.videoId").String()
 	}
 	if id == "" {
+		id = r.Get("overlay.musicItemThumbnailOverlayRenderer.content.musicPlayButtonRenderer.playNavigationEndpoint.watchEndpoint.videoId").String()
+	}
+	if id == "" {
 		return nil
 	}
-	title := RunsText(r.Get("flexColumns.0.musicResponsiveListItemFlexColumnRenderer.text"))
-	if title == "" {
+	titleCol := FlexColumn(r, 0)
+	title := RunsText(titleCol.Get("text"))
+	if title == "" || title == "Song deleted" {
 		return nil
 	}
 
-	artists := ArtistRefsFromRuns(r.Get("flexColumns.1.musicResponsiveListItemFlexColumnRenderer.text.runs"))
+	// Collect metadata runs from flex columns 1 and 2 (plays may sit in col 2).
+	var runObjs []gjson.Result
+	if col1 := FlexColumn(r, 1); col1.Exists() {
+		runObjs = append(runObjs, col1.Get("text.runs").Array()...)
+	}
+	if col2 := FlexColumn(r, 2); col2.Exists() {
+		if len(runObjs) > 0 {
+			runObjs = append(runObjs, gjson.Parse(`{"text":" • "}`))
+		}
+		runObjs = append(runObjs, col2.Get("text.runs").Array()...)
+	}
+	meta := SongRuns{}
+	if len(runObjs) > 0 {
+		// Rebuild a runs array for ParseSongRuns.
+		parts := make([]string, 0, len(runObjs))
+		for _, run := range runObjs {
+			parts = append(parts, run.Raw)
+		}
+		meta = ParseSongRuns(gjson.Parse("["+strings.Join(parts, ",")+"]"), true)
+	}
 
-	var album *models.AlbumRef
-	for _, idx := range []int{2, 3} {
-		col := r.Get("flexColumns." + strconv.Itoa(idx) + ".musicResponsiveListItemFlexColumnRenderer.text.runs.0")
-		if name := col.Get("text").String(); name != "" {
-			aid := col.Get("navigationEndpoint.browseEndpoint.browseId").String()
-			if strings.HasPrefix(aid, "MPREb_") || aid != "" {
-				album = &models.AlbumRef{Name: name, ID: aid}
+	// Dedicated album flex column (playlist / album rows).
+	if meta.Album == nil {
+		for _, idx := range []int{2, 3} {
+			col := FlexColumn(r, idx)
+			if !col.Exists() {
+				continue
+			}
+			run := col.Get("text.runs.0")
+			name := run.Get("text").String()
+			aid := run.Get("navigationEndpoint.browseEndpoint.browseId").String()
+			if name != "" && (strings.HasPrefix(aid, "MPRE") || strings.Contains(aid, "release_detail")) {
+				meta.Album = &models.AlbumRef{Name: name, ID: aid}
 				break
 			}
 		}
 	}
 
-	durText := RunsText(r.Get("fixedColumns.0.musicResponsiveListItemFlexColumnRenderer.text"))
-	arts := PreferMusicArtwork(MusicThumbnail(r.Get("thumbnail")))
+	durText := meta.DurationText
+	if fixed := FixedColumn(r, 0); fixed.Exists() {
+		if t := RunsText(fixed.Get("text")); t != "" {
+			durText = t
+		}
+	}
 
 	return &models.Track{
 		ID:           id,
 		Title:        title,
-		Artists:      artists,
-		Album:        album,
+		Artists:      meta.Artists,
+		Album:        meta.Album,
 		Duration:     ParseDuration(durText),
 		DurationText: durText,
-		Artwork:      arts,
+		Artwork:      PreferMusicArtwork(MusicThumbnail(r.Get("thumbnail"))),
 		Explicit:     IsExplicit(r.Get("badges")),
 	}
 }
@@ -65,19 +99,16 @@ func TrackFromTwoRow(r gjson.Result) *models.Track {
 	if title == "" {
 		return nil
 	}
-	var artists []models.ArtistRef
-	if run := r.Get("subtitle.runs.0"); run.Exists() {
-		artists = append(artists, models.ArtistRef{
-			Name: run.Get("text").String(),
-			ID:   run.Get("navigationEndpoint.browseEndpoint.browseId").String(),
-		})
-	}
+	meta := ParseSongRuns(r.Get("subtitle.runs"), true)
 	return &models.Track{
-		ID:       id,
-		Title:    title,
-		Artists:  artists,
-		Artwork:  PreferMusicArtwork(MusicThumbnail(r.Get("thumbnailRenderer"))),
-		Explicit: IsExplicit(r.Get("subtitleBadges")),
+		ID:           id,
+		Title:        title,
+		Artists:      meta.Artists,
+		Album:        meta.Album,
+		Duration:     ParseDuration(meta.DurationText),
+		DurationText: meta.DurationText,
+		Artwork:      PreferMusicArtwork(MusicThumbnail(r.Get("thumbnailRenderer"))),
+		Explicit:     IsExplicit(r.Get("subtitleBadges")),
 	}
 }
 
@@ -107,23 +138,24 @@ func AlbumFromTwoRow(r gjson.Result) *models.Album {
 	if playlistID == "" {
 		playlistID = r.Get("thumbnailOverlay.musicItemThumbnailOverlayRenderer.content.musicPlayButtonRenderer.playNavigationEndpoint.watchEndpoint.playlistId").String()
 	}
+	meta := ParseSongRuns(r.Get("subtitle.runs"), true)
 	year := 0
-	subtitle := r.Get("subtitle.runs")
-	if subtitle.Exists() {
-		last := subtitle.Array()
-		if n := len(last); n > 0 {
-			year, _ = strconv.Atoi(last[n-1].Get("text").String())
-		}
+	if meta.Year != "" {
+		year, _ = strconv.Atoi(meta.Year)
 	}
 	albumType := ""
-	if subtitle.Exists() && len(subtitle.Array()) > 0 {
-		albumType = subtitle.Array()[0].Get("text").String()
+	if runs := r.Get("subtitle.runs").Array(); len(runs) > 0 {
+		first := runs[0].Get("text").String()
+		if first == "Album" || first == "EP" || first == "Single" || first == "Audiobook" {
+			albumType = first
+		}
 	}
 
 	return &models.Album{
 		ID:         browseID,
 		PlaylistID: playlistID,
 		Title:      title,
+		Artists:    meta.Artists,
 		Year:       year,
 		Type:       albumType,
 		Artwork:    PreferMusicArtwork(MusicThumbnail(r.Get("thumbnailRenderer"))),
@@ -207,35 +239,29 @@ func AlbumFromResponsiveList(r gjson.Result) *models.Album {
 	if browseID == "" {
 		browseID = r.Get("flexColumns.0.musicResponsiveListItemFlexColumnRenderer.text.runs.0.navigationEndpoint.browseEndpoint.browseId").String()
 	}
-	if !strings.HasPrefix(browseID, "MPREb_") {
+	if !strings.HasPrefix(browseID, "MPRE") {
 		return nil
 	}
 	title := RunsText(r.Get("flexColumns.0.musicResponsiveListItemFlexColumnRenderer.text"))
-	var artists []models.ArtistRef
-	year := 0
+	if title == "" {
+		return nil
+	}
+	meta := ParseSongRuns(r.Get("flexColumns.1.musicResponsiveListItemFlexColumnRenderer.text.runs"), true)
 	albumType := ""
-	runs := r.Get("flexColumns.1.musicResponsiveListItemFlexColumnRenderer.text.runs").Array()
-	for i, run := range runs {
-		text := run.Get("text").String()
-		if text == "" || text == "•" || text == " · " {
-			continue
+	if runs := r.Get("flexColumns.1.musicResponsiveListItemFlexColumnRenderer.text.runs").Array(); len(runs) > 0 {
+		first := runs[0].Get("text").String()
+		if first == "Album" || first == "EP" || first == "Single" || first == "Audiobook" {
+			albumType = first
 		}
-		if bid := run.Get("navigationEndpoint.browseEndpoint.browseId").String(); bid != "" {
-			artists = append(artists, models.ArtistRef{Name: text, ID: bid})
-			continue
-		}
-		if y, err := strconv.Atoi(text); err == nil && y > 1900 && y < 2100 {
-			year = y
-			continue
-		}
-		if i == 0 && (text == "Album" || text == "EP" || text == "Single") {
-			albumType = text
-		}
+	}
+	year := 0
+	if meta.Year != "" {
+		year, _ = strconv.Atoi(meta.Year)
 	}
 	return &models.Album{
 		ID:       browseID,
 		Title:    title,
-		Artists:  artists,
+		Artists:  meta.Artists,
 		Year:     year,
 		Type:     albumType,
 		Artwork:  PreferMusicArtwork(MusicThumbnail(r.Get("thumbnail"))),
@@ -254,9 +280,19 @@ func PlaylistFromResponsiveList(r gjson.Result) *models.Playlist {
 	}
 	id := strings.TrimPrefix(browseID, "VL")
 	title := RunsText(r.Get("flexColumns.0.musicResponsiveListItemFlexColumnRenderer.text"))
+	if title == "" {
+		return nil
+	}
+	var author *models.ArtistRef
+	meta := ParseSongRuns(r.Get("flexColumns.1.musicResponsiveListItemFlexColumnRenderer.text.runs"), true)
+	if len(meta.Artists) > 0 {
+		a := meta.Artists[0]
+		author = &a
+	}
 	return &models.Playlist{
 		ID:      id,
 		Title:   title,
+		Author:  author,
 		Artwork: PreferMusicArtwork(MusicThumbnail(r.Get("thumbnail"))),
 	}
 }
